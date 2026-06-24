@@ -13,6 +13,7 @@ import requests
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.header import decode_header, make_header
 from html.parser import HTMLParser
 
 # ── Configurações ──────────────────────────────────────────────────────────────
@@ -40,7 +41,8 @@ def get_asaas_data():
     received = r.json().get('totalCount', 0)
 
     r = requests.get('https://api.asaas.com/v3/finance/balance', headers=h, timeout=20)
-    balance = r.json().get('balance', 0)
+    bal_data = r.json()
+    balance = bal_data.get('balance', bal_data.get('totalBalance', 0))
 
     return overdue, received, balance
 
@@ -59,7 +61,7 @@ def get_linklei_emails():
         for num in msgs[0].split()[-20:]:
             _, data = mail.fetch(num, '(RFC822)')
             msg = email_lib.message_from_bytes(data[0][1])
-            subject = msg.get('Subject', '')
+            subject = str(make_header(decode_header(msg.get('Subject', '') or '')))
             date_str = msg.get('Date', '')
             movements.append({'subject': subject, 'date': date_str})
         mail.logout()
