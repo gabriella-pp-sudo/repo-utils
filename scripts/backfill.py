@@ -62,17 +62,48 @@ def linklei_login():
     p.feed(r.text)
     if not p.csrf:
         raise RuntimeError('CSRF token não encontrado')
+
+    csrf_field = next((c.name for c in sess.cookies if 'csrf' in c.name.lower()), 'csrf_test_name')
+    csrf_value = sess.cookies.get(csrf_field, p.csrf)
+    print(f'  [LinkLei] csrf_field={csrf_field} csrf={csrf_value[:12]}...')
+
+    base_headers = {
+        'X-CSRF-TOKEN': csrf_value,
+        'Accept': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Referer': 'https://app.linklei.com.br/login',
+        'Origin': 'https://app.linklei.com.br',
+    }
+
     resp = sess.post(
         'https://app.linklei.com.br/login',
         json={'email': LINKLEI_EMAIL, 'password': LINKLEI_PASSWORD},
-        headers={'X-CSRF-TOKEN': p.csrf, 'Accept': 'application/json',
-                 'X-Requested-With': 'XMLHttpRequest'},
+        headers=base_headers,
         timeout=20,
     )
-    data = resp.json() if resp.headers.get('content-type', '').startswith('application/json') else {}
+    print(f'  [LinkLei] tentativa JSON: HTTP {resp.status_code}')
+
+    if resp.status_code in (419, 422):
+        resp = sess.post(
+            'https://app.linklei.com.br/login',
+            data={
+                'email': LINKLEI_EMAIL,
+                'password': LINKLEI_PASSWORD,
+                csrf_field: csrf_value,
+            },
+            headers=base_headers,
+            timeout=20,
+        )
+        print(f'  [LinkLei] tentativa form-encoded: HTTP {resp.status_code}')
+
+    if resp.status_code not in (200, 201):
+        print(f'  [LinkLei] resposta: {resp.text[:500]}')
+
+    ct = resp.headers.get('content-type', '')
+    data = resp.json() if ct.startswith('application/json') else {}
     api_token = (data.get('api-token') or data.get('token')
                  or data.get('access_token') or sess.cookies.get('api-token'))
-    print(f'  [LinkLei] login HTTP {resp.status_code} | token: {"ok" if api_token else "não encontrado"}')
+    print(f'  [LinkLei] token: {"ok" if api_token else "não encontrado"}')
     return sess, api_token
 
 def create_task(sess, api_token, title, deadline):
