@@ -90,20 +90,50 @@ def linklei_login():
     if not p.csrf:
         raise RuntimeError('CSRF token não encontrado em /login')
 
+    # CodeIgniter stores CSRF in a cookie whose name is the field name
+    csrf_field = next((c.name for c in sess.cookies if 'csrf' in c.name.lower()), 'csrf_test_name')
+    csrf_value = sess.cookies.get(csrf_field, p.csrf)
+    print(f'  [LinkLei] csrf_field={csrf_field} csrf={csrf_value[:12]}...')
+
+    base_headers = {
+        'X-CSRF-TOKEN': csrf_value,
+        'Accept': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Referer': 'https://app.linklei.com.br/login',
+        'Origin': 'https://app.linklei.com.br',
+    }
+
+    # Tentativa 1: JSON body
     resp = sess.post(
         'https://app.linklei.com.br/login',
         json={'email': LINKLEI_EMAIL, 'password': LINKLEI_PASSWORD},
-        headers={
-            'X-CSRF-TOKEN': p.csrf,
-            'Accept': 'application/json',
-            'X-Requested-With': 'XMLHttpRequest',
-        },
+        headers=base_headers,
         timeout=20,
     )
-    data = resp.json() if resp.headers.get('content-type', '').startswith('application/json') else {}
+    print(f'  [LinkLei] tentativa JSON: HTTP {resp.status_code}')
+
+    if resp.status_code in (419, 422):
+        # Tentativa 2: form-encoded com CSRF no corpo (padrão CodeIgniter)
+        resp = sess.post(
+            'https://app.linklei.com.br/login',
+            data={
+                'email': LINKLEI_EMAIL,
+                'password': LINKLEI_PASSWORD,
+                csrf_field: csrf_value,
+            },
+            headers=base_headers,
+            timeout=20,
+        )
+        print(f'  [LinkLei] tentativa form-encoded: HTTP {resp.status_code}')
+
+    if resp.status_code not in (200, 201):
+        print(f'  [LinkLei] resposta: {resp.text[:500]}')
+
+    ct = resp.headers.get('content-type', '')
+    data = resp.json() if ct.startswith('application/json') else {}
     api_token = (data.get('api-token') or data.get('token')
                  or data.get('access_token') or sess.cookies.get('api-token'))
-    print(f'  [LinkLei] login HTTP {resp.status_code} | token: {"ok" if api_token else "não encontrado"}')
+    print(f'  [LinkLei] token: {"ok" if api_token else "não encontrado"}')
     return sess, api_token
 
 # ── LinkLei — criar tarefa ────────────────────────────────────────────────────
@@ -149,7 +179,9 @@ def update_spreadsheet(overdue, received, balance, movements):
         print(f'  [Sheets] Erro: {e}')
 
 # ── Email — relatório diário ───────────────────────────────────────────────────
-def send_report(overdue, received, balance, movements):
+def send_report(overdue, received, balance, movements, created_tasks=None):
+    if created_tasks is None:
+        created_tasks = []
     mov_label = movements[0]['subject'] if movements else 'Sem novas movimentações'
     html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
 <body style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;padding:20px">
@@ -175,7 +207,7 @@ def send_report(overdue, received, balance, movements):
   <p style="margin:0;font-size:12px;color:#888;text-transform:uppercase;letter-spacing:1px">Nova Movimentação</p>
   <p style="margin:6px 0 0;font-weight:bold">{mov_label}</p>
 </div>
-{''.join(f'<p style="margin:4px 0;font-size:13px">✅ Tarefa criada: {m["subject"]}</p>' for m in movements)}
+{''.join(f'<p style="margin:4px 0;font-size:13px">✅ Tarefa criada: {m["subject"]}</p>' for m in created_tasks) if created_tasks else '<p style="margin:4px 0;font-size:13px;color:#888">Nenhuma tarefa criada no LinkLei</p>'}
 <p style="color:#ccc;font-size:11px;text-align:center;margin-top:24px">
   Gerado automaticamente · {TODAY_BR} 06:00 UTC
 </p>
@@ -212,6 +244,7 @@ def main():
 
     # 3. Criar tarefas no LinkLei
     print('\n[3/5] Criando tarefas no LinkLei...')
+    created_tasks = []
     if movements:
         try:
             sess, api_token = linklei_login()
@@ -220,6 +253,9 @@ def main():
                 for mov in movements:
                     status = create_task(sess, api_token, mov['subject'], deadline)
                     print(f'  HTTP {status}: {mov["subject"][:70]}')
+                    if status in (200, 201):
+                        created_tasks.append(mov)
+                print(f'  {len(created_tasks)}/{len(movements)} tarefas criadas ✓')
             else:
                 print('  Sem api-token — tarefas não criadas')
         except Exception as e:
@@ -233,7 +269,7 @@ def main():
 
     # 5. Enviar relatório
     print('\n[5/5] Enviando relatório por email...')
-    send_report(overdue, received, balance, movements)
+    send_report(overdue, received, balance, movements, created_tasks)
 
     print('\n✓ Concluído.')
 
