@@ -63,12 +63,15 @@ def linklei_login():
     if not p.csrf:
         raise RuntimeError('CSRF token não encontrado')
 
-    csrf_field = next((c.name for c in sess.cookies if 'csrf' in c.name.lower()), 'csrf_test_name')
-    csrf_value = sess.cookies.get(csrf_field, p.csrf)
-    print(f'  [LinkLei] csrf_field={csrf_field} csrf={csrf_value[:12]}...')
+    raw_token = p.csrf
+    xsrf_cookie = next(
+        (sess.cookies.get(c.name) for c in sess.cookies if 'csrf' in c.name.lower()),
+        raw_token
+    )
+    cookie_names = [c.name for c in sess.cookies]
+    print(f'  [LinkLei] cookies={cookie_names} raw_token={raw_token[:12]}...')
 
-    base_headers = {
-        'X-CSRF-TOKEN': csrf_value,
+    xhr_headers = {
         'Accept': 'application/json',
         'X-Requested-With': 'XMLHttpRequest',
         'Referer': 'https://app.linklei.com.br/login',
@@ -78,26 +81,31 @@ def linklei_login():
     resp = sess.post(
         'https://app.linklei.com.br/login',
         json={'email': LINKLEI_EMAIL, 'password': LINKLEI_PASSWORD},
-        headers=base_headers,
+        headers={**xhr_headers, 'X-CSRF-TOKEN': raw_token},
         timeout=20,
     )
-    print(f'  [LinkLei] tentativa JSON: HTTP {resp.status_code}')
+    print(f'  [LinkLei] tentativa 1 JSON+X-CSRF-TOKEN: HTTP {resp.status_code}')
 
-    if resp.status_code in (419, 422):
+    if resp.status_code == 419:
         resp = sess.post(
             'https://app.linklei.com.br/login',
-            data={
-                'email': LINKLEI_EMAIL,
-                'password': LINKLEI_PASSWORD,
-                csrf_field: csrf_value,
-            },
-            headers=base_headers,
+            data={'email': LINKLEI_EMAIL, 'password': LINKLEI_PASSWORD, '_token': raw_token},
+            headers=xhr_headers,
             timeout=20,
         )
-        print(f'  [LinkLei] tentativa form-encoded: HTTP {resp.status_code}')
+        print(f'  [LinkLei] tentativa 2 form+_token: HTTP {resp.status_code}')
+
+    if resp.status_code == 419:
+        resp = sess.post(
+            'https://app.linklei.com.br/login',
+            json={'email': LINKLEI_EMAIL, 'password': LINKLEI_PASSWORD},
+            headers={**xhr_headers, 'X-XSRF-TOKEN': xsrf_cookie},
+            timeout=20,
+        )
+        print(f'  [LinkLei] tentativa 3 JSON+X-XSRF-TOKEN: HTTP {resp.status_code}')
 
     if resp.status_code not in (200, 201):
-        print(f'  [LinkLei] resposta: {resp.text[:500]}')
+        print(f'  [LinkLei] resposta erro: {resp.text[:600]}')
 
     ct = resp.headers.get('content-type', '')
     data = resp.json() if ct.startswith('application/json') else {}
