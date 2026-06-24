@@ -1,0 +1,40 @@
+name: Backfill — Pereira & Ricci
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: 'Data inicial (YYYY-MM-DD)'
+        required: true
+        default: '2026-06-19'
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Instalar dependências
+        run: pip install -r scripts/requirements.txt
+
+      - name: Executar backfill
+        env:
+          ASAAS_API_KEY:                ${{ secrets.ASAAS_API_KEY }}
+          LINKLEI_EMAIL:                ${{ secrets.LINKLEI_EMAIL }}
+          LINKLEI_PASSWORD:             ${{ secrets.LINKLEI_PASSWORD }}
+          GMAIL_USER:                   ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD:           ${{ secrets.GMAIL_APP_PASSWORD }}
+          SPREADSHEET_ID:               ${{ secrets.SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON:  ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          START_DATE:                   ${{ github.event.inputs.start_date }}
+        run: python scripts/backfill.py
