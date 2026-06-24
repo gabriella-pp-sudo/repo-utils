@@ -90,44 +90,54 @@ def linklei_login():
     if not p.csrf:
         raise RuntimeError('CSRF token não encontrado em /login')
 
-    # CodeIgniter stores CSRF in a cookie whose name is the field name
-    csrf_field = next((c.name for c in sess.cookies if 'csrf' in c.name.lower()), 'csrf_test_name')
-    csrf_value = sess.cookies.get(csrf_field, p.csrf)
-    print(f'  [LinkLei] csrf_field={csrf_field} csrf={csrf_value[:12]}...')
+    # p.csrf é o token RAW do meta tag — correto para X-CSRF-TOKEN e _token
+    raw_token = p.csrf
+    # valor do cookie XSRF pode ser criptografado (Laravel) — usado em X-XSRF-TOKEN
+    xsrf_cookie = next(
+        (sess.cookies.get(c.name) for c in sess.cookies if 'csrf' in c.name.lower()),
+        raw_token
+    )
+    cookie_names = [c.name for c in sess.cookies]
+    print(f'  [LinkLei] cookies={cookie_names} raw_token={raw_token[:12]}...')
 
-    base_headers = {
-        'X-CSRF-TOKEN': csrf_value,
+    xhr_headers = {
         'Accept': 'application/json',
         'X-Requested-With': 'XMLHttpRequest',
         'Referer': 'https://app.linklei.com.br/login',
         'Origin': 'https://app.linklei.com.br',
     }
 
-    # Tentativa 1: JSON body
+    # Tentativa 1: JSON + X-CSRF-TOKEN com token RAW do meta tag (Laravel padrão)
     resp = sess.post(
         'https://app.linklei.com.br/login',
         json={'email': LINKLEI_EMAIL, 'password': LINKLEI_PASSWORD},
-        headers=base_headers,
+        headers={**xhr_headers, 'X-CSRF-TOKEN': raw_token},
         timeout=20,
     )
-    print(f'  [LinkLei] tentativa JSON: HTTP {resp.status_code}')
+    print(f'  [LinkLei] tentativa 1 JSON+X-CSRF-TOKEN: HTTP {resp.status_code}')
 
-    if resp.status_code in (419, 422):
-        # Tentativa 2: form-encoded com CSRF no corpo (padrão CodeIgniter)
+    if resp.status_code == 419:
+        # Tentativa 2: form-encoded com _token (campo padrão do Laravel)
         resp = sess.post(
             'https://app.linklei.com.br/login',
-            data={
-                'email': LINKLEI_EMAIL,
-                'password': LINKLEI_PASSWORD,
-                csrf_field: csrf_value,
-            },
-            headers=base_headers,
+            data={'email': LINKLEI_EMAIL, 'password': LINKLEI_PASSWORD, '_token': raw_token},
+            headers=xhr_headers,
             timeout=20,
         )
-        print(f'  [LinkLei] tentativa form-encoded: HTTP {resp.status_code}')
+        print(f'  [LinkLei] tentativa 2 form+_token: HTTP {resp.status_code}')
+
+    if resp.status_code == 419:
+        # Tentativa 3: JSON + X-XSRF-TOKEN com valor do cookie (variante Laravel)
+        resp = sess.post(
+            'https://app.linklei.com.br/login',
+            json={'email': LINKLEI_EMAIL, 'password': LINKLEI_PASSWORD},
+            headers={**xhr_headers, 'X-XSRF-TOKEN': xsrf_cookie},
+            timeout=20,
+        )
+        print(f'  [LinkLei] tentativa 3 JSON+X-XSRF-TOKEN: HTTP {resp.status_code}')
 
     if resp.status_code not in (200, 201):
-        print(f'  [LinkLei] resposta: {resp.text[:500]}')
+        print(f'  [LinkLei] resposta erro: {resp.text[:600]}')
 
     ct = resp.headers.get('content-type', '')
     data = resp.json() if ct.startswith('application/json') else {}
