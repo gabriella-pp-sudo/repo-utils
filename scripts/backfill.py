@@ -97,8 +97,17 @@ def linklei_login():
     data = resp.json() if ct.startswith('application/json') else {}
     if data:
         print(f'  [LinkLei] resposta JSON keys: {list(data.keys())}')
-    api_token = (data.get('api-token') or data.get('token')
-                 or data.get('access_token') or sess.cookies.get('api-token'))
+    user_data = data.get('user_data', {}) if isinstance(data, dict) else {}
+    if user_data and isinstance(user_data, dict):
+        print(f'  [LinkLei] user_data keys: {list(user_data.keys())}')
+    api_token = (
+        data.get('api-token') or data.get('token') or data.get('access_token')
+        or (user_data.get('api_token') if isinstance(user_data, dict) else None)
+        or (user_data.get('api-token') if isinstance(user_data, dict) else None)
+        or (user_data.get('token') if isinstance(user_data, dict) else None)
+        or (user_data.get('access_token') if isinstance(user_data, dict) else None)
+        or sess.cookies.get('api-token')
+    )
 
     if not api_token:
         for ep in ['/api/v1/me', '/api/v1/user', '/api/user']:
