@@ -109,30 +109,35 @@ def linklei_login():
         or sess.cookies.get('api-token')
     )
 
-    if not api_token:
-        for ep in ['/api/v1/me', '/api/v1/user', '/api/user']:
-            try:
-                me = sess.get(f'https://app.linklei.com.br{ep}',
-                              headers={'Accept': 'application/json'}, timeout=10)
-                print(f'  [LinkLei] {ep}: HTTP {me.status_code}')
-                if me.status_code == 200 and me.headers.get('content-type', '').startswith('application/json'):
-                    md = me.json()
-                    print(f'  [LinkLei] {ep} keys: {list(md.keys())}')
-                    api_token = (md.get('api_token') or md.get('api-token')
-                                 or md.get('token') or md.get('access_token'))
-                    if api_token:
-                        break
-            except Exception:
-                pass
+    import re as _re
+    from urllib.parse import unquote as _unquote
 
+    # 2) seguir redirect para capturar mais cookies/token
+    redirect_url = data.get('redirect', '') if isinstance(data, dict) else ''
+    if not api_token and redirect_url:
+        try:
+            dash = sess.get(redirect_url if redirect_url.startswith('http')
+                            else f'https://app.linklei.com.br{redirect_url}', timeout=20)
+            print(f'  [LinkLei] redirect: HTTP {dash.status_code} | cookies={[c.name for c in sess.cookies]}')
+            m = _re.search(r'["\']api[_-]token["\']\s*:\s*["\']([A-Za-z0-9|_\-\.]{20,})["\']', dash.text)
+            if m:
+                api_token = m.group(1)
+                print('  [LinkLei] token encontrado no HTML ✓')
+            api_token = api_token or sess.cookies.get('api-token')
+        except Exception as ex:
+            print(f'  [LinkLei] erro no redirect: {ex}')
+
+    # 3) XSRF-TOKEN URL-decoded como Bearer
     if not api_token:
-        print('  [LinkLei] sem Bearer token — usando sessão autenticada via cookie')
-        api_token = 'SESSION'
+        xsrf_val = sess.cookies.get('XSRF-TOKEN', '')
+        if xsrf_val:
+            api_token = _unquote(xsrf_val)
+            print(f'  [LinkLei] usando XSRF-TOKEN URL-decoded como bearer: {api_token[:16]}...')
 
     ud = user_data if isinstance(user_data, dict) else {}
     print(f'  [LinkLei] plan_is_free={ud.get("plan_is_free")} slug={ud.get("link_slug") or ud.get("slug")}')
-    print(f'  [LinkLei] modo auth: {"bearer" if api_token != "SESSION" else "session-cookie"}')
-    return sess, api_token, ud
+    print(f'  [LinkLei] modo auth: {"bearer" if api_token else "sem token"}')
+    return sess, api_token or 'SESSION', ud
 
 def create_task(sess, api_token, title, deadline, user_data=None):
     ud = user_data or {}
@@ -165,7 +170,7 @@ def create_task(sess, api_token, title, deadline, user_data=None):
         ct = resp.headers.get('content-type', '')
         err = resp.json() if ct.startswith('application/json') else resp.text[:200]
         print(f'    {url.split("/api/")[1]}: HTTP {resp.status_code} → {err}')
-        if resp.status_code not in (403, 404):
+        if resp.status_code not in (401, 403, 404):
             break
 
     return resp.status_code
