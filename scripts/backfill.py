@@ -129,25 +129,45 @@ def linklei_login():
         print('  [LinkLei] sem Bearer token — usando sessão autenticada via cookie')
         api_token = 'SESSION'
 
+    ud = user_data if isinstance(user_data, dict) else {}
+    print(f'  [LinkLei] plan_is_free={ud.get("plan_is_free")} slug={ud.get("link_slug") or ud.get("slug")}')
     print(f'  [LinkLei] modo auth: {"bearer" if api_token != "SESSION" else "session-cookie"}')
-    return sess, api_token
+    return sess, api_token, ud
 
-def create_task(sess, api_token, title, deadline):
-    headers = {'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest'}
+def create_task(sess, api_token, title, deadline, user_data=None):
+    ud = user_data or {}
+    slug = ud.get('link_slug') or ud.get('slug', '')
+
+    headers = {
+        'Accept': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Referer': 'https://app.linklei.com.br/tarefas',
+        'Origin': 'https://app.linklei.com.br',
+    }
     if api_token and api_token != 'SESSION':
         headers['Authorization'] = f'Bearer {api_token}'
     csrf_raw = sess.cookies.get('csrf_cookie_name', '')
     if csrf_raw:
         headers['X-CSRF-TOKEN'] = csrf_raw
+    xsrf = sess.cookies.get('XSRF-TOKEN', '')
+    if xsrf:
+        headers['X-XSRF-TOKEN'] = xsrf
 
-    resp = sess.post(
+    for url in [
         'https://app.linklei.com.br/api/v1/workspace/user-task/new',
-        json={'title': title, 'deadline': deadline},
-        headers=headers,
-        timeout=20,
-    )
-    if resp.status_code not in (200, 201) and resp.headers.get('content-type', '').startswith('application/json'):
-        print(f'    tarefa erro: {resp.json()}')
+        *([ f'https://app.linklei.com.br/api/v1/{slug}/user-task/new' ] if slug else []),
+        'https://app.linklei.com.br/api/v1/user-task/new',
+    ]:
+        resp = sess.post(url, json={'title': title, 'deadline': deadline},
+                         headers=headers, timeout=20)
+        if resp.status_code in (200, 201):
+            return resp.status_code
+        ct = resp.headers.get('content-type', '')
+        err = resp.json() if ct.startswith('application/json') else resp.text[:200]
+        print(f'    {url.split("/api/")[1]}: HTTP {resp.status_code} → {err}')
+        if resp.status_code not in (403, 404):
+            break
+
     return resp.status_code
 
 # ── Asaas (snapshot atual) ─────────────────────────────────────────────────────
@@ -209,12 +229,12 @@ def main():
     print('\n[2/3] Criando tarefas no LinkLei...')
     if emails:
         try:
-            sess, api_token = linklei_login()
+            sess, api_token, ud = linklei_login()
             if api_token:
                 criadas = 0
                 for e in emails:
                     deadline = (datetime.combine(e['date'], datetime.min.time()) + timedelta(days=4)).strftime('%Y-%m-%d')
-                    status = create_task(sess, api_token, e['subject'], deadline)
+                    status = create_task(sess, api_token, e['subject'], deadline, ud)
                     print(f'  HTTP {status} [{e["date"]}] prazo {deadline}: {e["subject"][:60]}')
                     if status in (200, 201):
                         criadas += 1
