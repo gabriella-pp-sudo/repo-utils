@@ -163,30 +163,46 @@ def linklei_login():
         print('  [LinkLei] sem Bearer token — usando sessão autenticada via cookie')
         api_token = 'SESSION'
 
+    ud = user_data if isinstance(user_data, dict) else {}
+    print(f'  [LinkLei] plan_is_free={ud.get("plan_is_free")} slug={ud.get("link_slug") or ud.get("slug")}')
     print(f'  [LinkLei] modo auth: {"bearer" if api_token and api_token != "SESSION" else "session-cookie"}')
-    return sess, api_token
+    return sess, api_token, ud
 
 # ── LinkLei — criar tarefa ────────────────────────────────────────────────────
-def create_task(sess, api_token, title, deadline):
+def create_task(sess, api_token, title, deadline, user_data=None):
+    ud = user_data or {}
+    slug = ud.get('link_slug') or ud.get('slug', '')
+
     headers = {
         'Accept': 'application/json',
         'X-Requested-With': 'XMLHttpRequest',
+        'Referer': 'https://app.linklei.com.br/tarefas',
+        'Origin': 'https://app.linklei.com.br',
     }
     if api_token and api_token != 'SESSION':
         headers['Authorization'] = f'Bearer {api_token}'
-    # Enviar CSRF para endpoints não-GET do Laravel
     csrf_raw = sess.cookies.get('csrf_cookie_name', '')
     if csrf_raw:
         headers['X-CSRF-TOKEN'] = csrf_raw
+    xsrf = sess.cookies.get('XSRF-TOKEN', '')
+    if xsrf:
+        headers['X-XSRF-TOKEN'] = xsrf
 
-    resp = sess.post(
+    for url in [
         'https://app.linklei.com.br/api/v1/workspace/user-task/new',
-        json={'title': title, 'deadline': deadline},
-        headers=headers,
-        timeout=20,
-    )
-    if resp.status_code not in (200, 201) and resp.headers.get('content-type', '').startswith('application/json'):
-        print(f'    tarefa erro: {resp.json()}')
+        *([ f'https://app.linklei.com.br/api/v1/{slug}/user-task/new' ] if slug else []),
+        'https://app.linklei.com.br/api/v1/user-task/new',
+    ]:
+        resp = sess.post(url, json={'title': title, 'deadline': deadline},
+                         headers=headers, timeout=20)
+        if resp.status_code in (200, 201):
+            return resp.status_code
+        ct = resp.headers.get('content-type', '')
+        err = resp.json() if ct.startswith('application/json') else resp.text[:200]
+        print(f'    {url.split("/api/")[1]}: HTTP {resp.status_code} → {err}')
+        if resp.status_code not in (403, 404):
+            break
+
     return resp.status_code
 
 # ── Google Sheets ──────────────────────────────────────────────────────────────
@@ -287,11 +303,11 @@ def main():
     created_tasks = []
     if movements:
         try:
-            sess, api_token = linklei_login()
+            sess, api_token, ud = linklei_login()
             if api_token:
                 deadline = (datetime.utcnow() + timedelta(days=4)).strftime('%Y-%m-%d')
                 for mov in movements:
-                    status = create_task(sess, api_token, mov['subject'], deadline)
+                    status = create_task(sess, api_token, mov['subject'], deadline, ud)
                     print(f'  HTTP {status}: {mov["subject"][:70]}')
                     if status in (200, 201):
                         created_tasks.append(mov)
