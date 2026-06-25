@@ -90,15 +90,12 @@ def linklei_login():
     if not p.csrf:
         raise RuntimeError('CSRF token não encontrado em /login')
 
-    # p.csrf é o token RAW do meta tag — correto para X-CSRF-TOKEN e _token
     raw_token = p.csrf
-    # valor do cookie XSRF pode ser criptografado (Laravel) — usado em X-XSRF-TOKEN
     xsrf_cookie = next(
         (sess.cookies.get(c.name) for c in sess.cookies if 'csrf' in c.name.lower()),
         raw_token
     )
-    cookie_names = [c.name for c in sess.cookies]
-    print(f'  [LinkLei] cookies={cookie_names} raw_token={raw_token[:12]}...')
+    print(f'  [LinkLei] cookies={[c.name for c in sess.cookies]} raw_token={raw_token[:12]}...')
 
     xhr_headers = {
         'Accept': 'application/json',
@@ -107,56 +104,80 @@ def linklei_login():
         'Origin': 'https://app.linklei.com.br',
     }
 
-    # Tentativa 1: JSON + X-CSRF-TOKEN com token RAW do meta tag (Laravel padrão)
     resp = sess.post(
         'https://app.linklei.com.br/login',
         json={'email': LINKLEI_EMAIL, 'password': LINKLEI_PASSWORD},
         headers={**xhr_headers, 'X-CSRF-TOKEN': raw_token},
         timeout=20,
     )
-    print(f'  [LinkLei] tentativa 1 JSON+X-CSRF-TOKEN: HTTP {resp.status_code}')
+    print(f'  [LinkLei] login HTTP {resp.status_code} | ct={resp.headers.get("content-type","?")}')
 
     if resp.status_code == 419:
-        # Tentativa 2: form-encoded com _token (campo padrão do Laravel)
         resp = sess.post(
             'https://app.linklei.com.br/login',
             data={'email': LINKLEI_EMAIL, 'password': LINKLEI_PASSWORD, '_token': raw_token},
-            headers=xhr_headers,
-            timeout=20,
+            headers=xhr_headers, timeout=20,
         )
-        print(f'  [LinkLei] tentativa 2 form+_token: HTTP {resp.status_code}')
-
-    if resp.status_code == 419:
-        # Tentativa 3: JSON + X-XSRF-TOKEN com valor do cookie (variante Laravel)
-        resp = sess.post(
-            'https://app.linklei.com.br/login',
-            json={'email': LINKLEI_EMAIL, 'password': LINKLEI_PASSWORD},
-            headers={**xhr_headers, 'X-XSRF-TOKEN': xsrf_cookie},
-            timeout=20,
-        )
-        print(f'  [LinkLei] tentativa 3 JSON+X-XSRF-TOKEN: HTTP {resp.status_code}')
+        print(f'  [LinkLei] fallback form+_token: HTTP {resp.status_code}')
 
     if resp.status_code not in (200, 201):
-        print(f'  [LinkLei] resposta erro: {resp.text[:600]}')
+        print(f'  [LinkLei] erro: {resp.text[:500]}')
+        return sess, None
 
+    # Login OK — tentar extrair Bearer token da resposta JSON
     ct = resp.headers.get('content-type', '')
     data = resp.json() if ct.startswith('application/json') else {}
+    if data:
+        print(f'  [LinkLei] resposta JSON keys: {list(data.keys())}')
     api_token = (data.get('api-token') or data.get('token')
                  or data.get('access_token') or sess.cookies.get('api-token'))
-    print(f'  [LinkLei] token: {"ok" if api_token else "não encontrado"}')
+
+    if not api_token:
+        # Tentar buscar token em endpoints de perfil
+        for ep in ['/api/v1/me', '/api/v1/user', '/api/user']:
+            try:
+                me = sess.get(f'https://app.linklei.com.br{ep}',
+                              headers={'Accept': 'application/json'}, timeout=10)
+                print(f'  [LinkLei] {ep}: HTTP {me.status_code}')
+                if me.status_code == 200 and me.headers.get('content-type', '').startswith('application/json'):
+                    md = me.json()
+                    print(f'  [LinkLei] {ep} keys: {list(md.keys())}')
+                    api_token = (md.get('api_token') or md.get('api-token')
+                                 or md.get('token') or md.get('access_token'))
+                    if api_token:
+                        break
+            except Exception:
+                pass
+
+    if not api_token:
+        # Autenticação por cookie de sessão — linklei_session já está no sess
+        print('  [LinkLei] sem Bearer token — usando sessão autenticada via cookie')
+        api_token = 'SESSION'
+
+    print(f'  [LinkLei] modo auth: {"bearer" if api_token and api_token != "SESSION" else "session-cookie"}')
     return sess, api_token
 
 # ── LinkLei — criar tarefa ────────────────────────────────────────────────────
 def create_task(sess, api_token, title, deadline):
+    headers = {
+        'Accept': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+    }
+    if api_token and api_token != 'SESSION':
+        headers['Authorization'] = f'Bearer {api_token}'
+    # Enviar CSRF para endpoints não-GET do Laravel
+    csrf_raw = sess.cookies.get('csrf_cookie_name', '')
+    if csrf_raw:
+        headers['X-CSRF-TOKEN'] = csrf_raw
+
     resp = sess.post(
         'https://app.linklei.com.br/api/v1/workspace/user-task/new',
         json={'title': title, 'deadline': deadline},
-        headers={
-            'Authorization': f'Bearer {api_token}',
-            'Accept': 'application/json',
-        },
+        headers=headers,
         timeout=20,
     )
+    if resp.status_code not in (200, 201) and resp.headers.get('content-type', '').startswith('application/json'):
+        print(f'    tarefa erro: {resp.json()}')
     return resp.status_code
 
 # ── Google Sheets ──────────────────────────────────────────────────────────────
