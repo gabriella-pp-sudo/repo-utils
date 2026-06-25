@@ -124,49 +124,52 @@ def linklei_login():
         print(f'  [LinkLei] erro: {resp.text[:500]}')
         return sess, None
 
-    # Login OK — tentar extrair Bearer token da resposta JSON
+    # Login OK — extrair token
+    import re as _re
+    from urllib.parse import unquote as _unquote
     ct = resp.headers.get('content-type', '')
     data = resp.json() if ct.startswith('application/json') else {}
     if data:
-        print(f'  [LinkLei] resposta JSON keys: {list(data.keys())}')
+        print(f'  [LinkLei] login JSON keys: {list(data.keys())}')
     user_data = data.get('user_data', {}) if isinstance(data, dict) else {}
-    if user_data and isinstance(user_data, dict):
-        print(f'  [LinkLei] user_data keys: {list(user_data.keys())}')
+    redirect_url = data.get('redirect', '') if isinstance(data, dict) else ''
+
+    # 1) token direto no JSON de login
     api_token = (
         data.get('api-token') or data.get('token') or data.get('access_token')
         or (user_data.get('api_token') if isinstance(user_data, dict) else None)
         or (user_data.get('api-token') if isinstance(user_data, dict) else None)
-        or (user_data.get('token') if isinstance(user_data, dict) else None)
-        or (user_data.get('access_token') if isinstance(user_data, dict) else None)
         or sess.cookies.get('api-token')
     )
 
-    if not api_token:
-        # Tentar buscar token em endpoints de perfil
-        for ep in ['/api/v1/me', '/api/v1/user', '/api/user']:
-            try:
-                me = sess.get(f'https://app.linklei.com.br{ep}',
-                              headers={'Accept': 'application/json'}, timeout=10)
-                print(f'  [LinkLei] {ep}: HTTP {me.status_code}')
-                if me.status_code == 200 and me.headers.get('content-type', '').startswith('application/json'):
-                    md = me.json()
-                    print(f'  [LinkLei] {ep} keys: {list(md.keys())}')
-                    api_token = (md.get('api_token') or md.get('api-token')
-                                 or md.get('token') or md.get('access_token'))
-                    if api_token:
-                        break
-            except Exception:
-                pass
+    # 2) seguir redirect do login — pode setar cookies ou retornar token no HTML
+    if not api_token and redirect_url:
+        try:
+            dash = sess.get(redirect_url if redirect_url.startswith('http')
+                            else f'https://app.linklei.com.br{redirect_url}',
+                            timeout=20)
+            print(f'  [LinkLei] redirect {redirect_url}: HTTP {dash.status_code} '
+                  f'| novos cookies={[c.name for c in sess.cookies]}')
+            # Procurar token em variáveis JS do dashboard
+            m = _re.search(r'["\']api[_-]token["\']\s*:\s*["\']([A-Za-z0-9|_\-\.]{20,})["\']', dash.text)
+            if m:
+                api_token = m.group(1)
+                print(f'  [LinkLei] token encontrado no HTML do dashboard ✓')
+            api_token = api_token or sess.cookies.get('api-token')
+        except Exception as ex:
+            print(f'  [LinkLei] erro no redirect: {ex}')
 
+    # 3) XSRF-TOKEN URL-decoded como Bearer (SPA pattern)
     if not api_token:
-        # Autenticação por cookie de sessão — linklei_session já está no sess
-        print('  [LinkLei] sem Bearer token — usando sessão autenticada via cookie')
-        api_token = 'SESSION'
+        xsrf_val = sess.cookies.get('XSRF-TOKEN', '')
+        if xsrf_val:
+            api_token = _unquote(xsrf_val)
+            print(f'  [LinkLei] usando XSRF-TOKEN URL-decoded como bearer: {api_token[:16]}...')
 
     ud = user_data if isinstance(user_data, dict) else {}
     print(f'  [LinkLei] plan_is_free={ud.get("plan_is_free")} slug={ud.get("link_slug") or ud.get("slug")}')
-    print(f'  [LinkLei] modo auth: {"bearer" if api_token and api_token != "SESSION" else "session-cookie"}')
-    return sess, api_token, ud
+    print(f'  [LinkLei] modo auth: {"bearer" if api_token else "sem token"}')
+    return sess, api_token or 'SESSION', ud
 
 # ── LinkLei — criar tarefa ────────────────────────────────────────────────────
 def create_task(sess, api_token, title, deadline, user_data=None):
@@ -200,7 +203,7 @@ def create_task(sess, api_token, title, deadline, user_data=None):
         ct = resp.headers.get('content-type', '')
         err = resp.json() if ct.startswith('application/json') else resp.text[:200]
         print(f'    {url.split("/api/")[1]}: HTTP {resp.status_code} → {err}')
-        if resp.status_code not in (403, 404):
+        if resp.status_code not in (401, 403, 404):
             break
 
     return resp.status_code
