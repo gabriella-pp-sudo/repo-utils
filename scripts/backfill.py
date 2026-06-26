@@ -44,6 +44,17 @@ def get_emails_since(start_date_str):
     return emails
 
 # ── LinkLei — Playwright para capturar Bearer token ───────────────────────────
+def _find_visible(page, selectors, timeout=5000):
+    """Retorna o primeiro seletor visível dentro do timeout."""
+    from playwright.sync_api import TimeoutError as PWTimeout
+    for sel in selectors:
+        try:
+            page.wait_for_selector(sel, state='visible', timeout=timeout)
+            return sel
+        except PWTimeout:
+            continue
+    return None
+
 def get_linklei_token():
     """Faz login real via browser headless e intercepta o Bearer token do SPA."""
     from playwright.sync_api import sync_playwright
@@ -72,17 +83,83 @@ def get_linklei_token():
         print('  [Playwright] abrindo página de login...')
         page.goto('https://app.linklei.com.br/login', timeout=30000)
         page.wait_for_load_state('networkidle', timeout=15000)
+        print(f'  [Playwright] título: {page.title()} | URL: {page.url}')
 
-        page.fill('input[type="email"]', LINKLEI_EMAIL)
-        page.fill('input[type="password"]', LINKLEI_PASSWORD)
-        page.click('button[type="submit"]')
+        # ── Preencher email ──────────────────────────────────────────────────
+        email_sel = _find_visible(page, [
+            'input[type="email"]',
+            'input[name="email"]',
+            'input[placeholder*="email" i]',
+            'input[placeholder*="e-mail" i]',
+        ], timeout=15000)
+
+        if not email_sel:
+            inputs = page.eval_on_selector_all('input', 'els => els.map(e => e.outerHTML)')
+            print(f'  [Playwright] campos de input na página: {inputs}')
+            browser.close()
+            return None
+
+        print(f'  [Playwright] campo email: {email_sel}')
+        page.fill(email_sel, LINKLEI_EMAIL)
+
+        # ── Campo de senha (pode não aparecer até o email ser submetido) ─────
+        pwd_selectors = [
+            'input[type="password"]',
+            'input[name="password"]',
+            'input[placeholder*="senha" i]',
+            'input[placeholder*="password" i]',
+        ]
+
+        pwd_sel = _find_visible(page, pwd_selectors, timeout=3000)
+
+        if not pwd_sel:
+            # Formulário em duas etapas: submete o email primeiro
+            print('  [Playwright] senha não visível — submetendo email (Tab+Enter)...')
+            page.press(email_sel, 'Tab')
+            page.wait_for_timeout(500)
+            page.press(email_sel, 'Enter')
+            page.wait_for_timeout(2000)
+            # tenta também clicar em botão "Próximo" ou "Continuar"
+            next_btn = _find_visible(page, [
+                'button[type="submit"]',
+                'button:text("Próximo")',
+                'button:text("Continuar")',
+                'button:text("Next")',
+            ], timeout=3000)
+            if next_btn and not pwd_sel:
+                page.click(next_btn)
+                page.wait_for_timeout(2000)
+            pwd_sel = _find_visible(page, pwd_selectors, timeout=8000)
+
+        if not pwd_sel:
+            inputs = page.eval_on_selector_all('input', 'els => els.map(e => e.outerHTML)')
+            print(f'  [Playwright] inputs após email: {inputs}')
+            browser.close()
+            return None
+
+        print(f'  [Playwright] campo senha: {pwd_sel}')
+        page.fill(pwd_sel, LINKLEI_PASSWORD)
+
+        # ── Submeter formulário ──────────────────────────────────────────────
+        submit_sel = _find_visible(page, [
+            'button[type="submit"]',
+            'button:text("Entrar")',
+            'button:text("Login")',
+            'button:text("Acessar")',
+            'input[type="submit"]',
+        ], timeout=5000)
+
+        if submit_sel:
+            page.click(submit_sel)
+        else:
+            page.press(pwd_sel, 'Enter')
 
         page.wait_for_load_state('networkidle', timeout=20000)
         page.wait_for_timeout(3000)
         print(f'  [Playwright] URL pós-login: {page.url}')
 
         if not captured['token']:
-            print('  [Playwright] token não encontrado após login — navegando para /tarefas...')
+            print('  [Playwright] navegando para /tarefas...')
             page.goto('https://app.linklei.com.br/tarefas', timeout=20000)
             page.wait_for_load_state('networkidle', timeout=15000)
             page.wait_for_timeout(3000)
