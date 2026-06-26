@@ -14,16 +14,15 @@ from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.header import decode_header, make_header
-from html.parser import HTMLParser
 
 # ── Configurações ──────────────────────────────────────────────────────────────
-ASAAS_API_KEY     = os.environ['ASAAS_API_KEY']
-LINKLEI_EMAIL     = os.environ['LINKLEI_EMAIL']
-LINKLEI_PASSWORD  = os.environ['LINKLEI_PASSWORD']
-GMAIL_USER        = os.environ['GMAIL_USER']
+ASAAS_API_KEY      = os.environ['ASAAS_API_KEY']
+LINKLEI_EMAIL      = os.environ['LINKLEI_EMAIL']
+LINKLEI_PASSWORD   = os.environ['LINKLEI_PASSWORD']
+GMAIL_USER         = os.environ['GMAIL_USER']
 GMAIL_APP_PASSWORD = os.environ.get('GMAIL_APP_PASSWORD', '')
-SPREADSHEET_ID    = os.environ.get('SPREADSHEET_ID', '')
-GOOGLE_SA_JSON    = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON', '')
+SPREADSHEET_ID     = os.environ.get('SPREADSHEET_ID', '')
+GOOGLE_SA_JSON     = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON', '')
 
 TODAY    = datetime.utcnow().strftime('%Y-%m-%d')
 TODAY_BR = datetime.utcnow().strftime('%d/%m/%Y')
@@ -71,133 +70,84 @@ def get_linklei_emails():
         print(f'  [IMAP] Erro: {e}')
         return []
 
-# ── LinkLei — autenticação ────────────────────────────────────────────────────
-class _CSRFParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.csrf = None
-    def handle_starttag(self, tag, attrs):
-        if tag == 'meta':
-            d = dict(attrs)
-            if d.get('name') == 'csrf-token':
-                self.csrf = d.get('content')
+# ── LinkLei — Playwright para capturar Bearer token ───────────────────────────
+def get_linklei_token():
+    """Faz login real via browser headless e intercepta o Bearer token do SPA."""
+    from playwright.sync_api import sync_playwright
 
-def linklei_login():
-    sess = requests.Session()
-    r = sess.get('https://app.linklei.com.br/login', timeout=20)
-    p = _CSRFParser()
-    p.feed(r.text)
-    if not p.csrf:
-        raise RuntimeError('CSRF token não encontrado em /login')
+    captured = {'token': None}
 
-    raw_token = p.csrf
-    xsrf_cookie = next(
-        (sess.cookies.get(c.name) for c in sess.cookies if 'csrf' in c.name.lower()),
-        raw_token
-    )
-    print(f'  [LinkLei] cookies={[c.name for c in sess.cookies]} raw_token={raw_token[:12]}...')
+    def on_request(req):
+        if captured['token']:
+            return
+        auth = req.headers.get('authorization', '')
+        if auth.startswith('Bearer ') and '/api/v1/' in req.url:
+            t = auth[7:]
+            if len(t) > 20:
+                captured['token'] = t
+                print(f'  [Playwright] token capturado ({req.url.split("/api/v1/")[-1][:40]}) ✓')
 
-    xhr_headers = {
-        'Accept': 'application/json',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Referer': 'https://app.linklei.com.br/login',
-        'Origin': 'https://app.linklei.com.br',
-    }
-
-    resp = sess.post(
-        'https://app.linklei.com.br/login',
-        json={'email': LINKLEI_EMAIL, 'password': LINKLEI_PASSWORD},
-        headers={**xhr_headers, 'X-CSRF-TOKEN': raw_token},
-        timeout=20,
-    )
-    print(f'  [LinkLei] login HTTP {resp.status_code} | ct={resp.headers.get("content-type","?")}')
-
-    if resp.status_code == 419:
-        resp = sess.post(
-            'https://app.linklei.com.br/login',
-            data={'email': LINKLEI_EMAIL, 'password': LINKLEI_PASSWORD, '_token': raw_token},
-            headers=xhr_headers, timeout=20,
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-dev-shm-usage'],
         )
-        print(f'  [LinkLei] fallback form+_token: HTTP {resp.status_code}')
+        ctx = browser.new_context()
+        page = ctx.new_page()
+        page.on('request', on_request)
 
-    if resp.status_code not in (200, 201):
-        print(f'  [LinkLei] erro: {resp.text[:500]}')
-        return sess, None
+        print('  [Playwright] abrindo página de login...')
+        page.goto('https://app.linklei.com.br/login', timeout=30000)
+        page.wait_for_load_state('networkidle', timeout=15000)
 
-    # Login OK — extrair token
-    import re as _re
-    from urllib.parse import unquote as _unquote
-    ct = resp.headers.get('content-type', '')
-    data = resp.json() if ct.startswith('application/json') else {}
-    if data:
-        print(f'  [LinkLei] login JSON keys: {list(data.keys())}')
-    user_data = data.get('user_data', {}) if isinstance(data, dict) else {}
-    redirect_url = data.get('redirect', '') if isinstance(data, dict) else ''
+        page.fill('input[type="email"]', LINKLEI_EMAIL)
+        page.fill('input[type="password"]', LINKLEI_PASSWORD)
+        page.click('button[type="submit"]')
 
-    # 1) token direto no JSON de login
-    api_token = (
-        data.get('api-token') or data.get('token') or data.get('access_token')
-        or (user_data.get('api_token') if isinstance(user_data, dict) else None)
-        or (user_data.get('api-token') if isinstance(user_data, dict) else None)
-        or sess.cookies.get('api-token')
-    )
+        page.wait_for_load_state('networkidle', timeout=20000)
+        page.wait_for_timeout(3000)
+        print(f'  [Playwright] URL pós-login: {page.url}')
 
-    # 2) seguir redirect do login — pode setar cookies ou retornar token no HTML
-    if not api_token and redirect_url:
-        try:
-            dash = sess.get(redirect_url if redirect_url.startswith('http')
-                            else f'https://app.linklei.com.br{redirect_url}',
-                            timeout=20)
-            print(f'  [LinkLei] redirect {redirect_url}: HTTP {dash.status_code} '
-                  f'| novos cookies={[c.name for c in sess.cookies]}')
-            # Procurar token em variáveis JS do dashboard
-            m = _re.search(r'["\']api[_-]token["\']\s*:\s*["\']([A-Za-z0-9|_\-\.]{20,})["\']', dash.text)
-            if m:
-                api_token = m.group(1)
-                print(f'  [LinkLei] token encontrado no HTML do dashboard ✓')
-            api_token = api_token or sess.cookies.get('api-token')
-        except Exception as ex:
-            print(f'  [LinkLei] erro no redirect: {ex}')
+        if not captured['token']:
+            print('  [Playwright] token não encontrado após login — navegando para /tarefas...')
+            page.goto('https://app.linklei.com.br/tarefas', timeout=20000)
+            page.wait_for_load_state('networkidle', timeout=15000)
+            page.wait_for_timeout(3000)
 
-    # 3) XSRF-TOKEN URL-decoded como Bearer (SPA pattern)
-    if not api_token:
-        xsrf_val = sess.cookies.get('XSRF-TOKEN', '')
-        if xsrf_val:
-            api_token = _unquote(xsrf_val)
-            print(f'  [LinkLei] usando XSRF-TOKEN URL-decoded como bearer: {api_token[:16]}...')
+        if not captured['token']:
+            print('  [Playwright] tentando /dashboard...')
+            page.goto('https://app.linklei.com.br/dashboard', timeout=20000)
+            page.wait_for_load_state('networkidle', timeout=15000)
+            page.wait_for_timeout(2000)
 
-    ud = user_data if isinstance(user_data, dict) else {}
-    print(f'  [LinkLei] plan_is_free={ud.get("plan_is_free")} slug={ud.get("link_slug") or ud.get("slug")}')
-    print(f'  [LinkLei] modo auth: {"bearer" if api_token else "sem token"}')
-    return sess, api_token or 'SESSION', ud
+        browser.close()
 
-# ── LinkLei — criar tarefa ────────────────────────────────────────────────────
-def create_task(sess, api_token, title, deadline, user_data=None):
-    ud = user_data or {}
-    slug = ud.get('link_slug') or ud.get('slug', '')
+    if captured['token']:
+        print(f'  [Playwright] token: {captured["token"][:16]}...')
+    else:
+        print('  [Playwright] AVISO: token não capturado')
+
+    return captured['token']
+
+# ── LinkLei — criar tarefa via API ────────────────────────────────────────────
+def create_task(bearer_token, title, deadline):
+    if not bearer_token:
+        return 0
 
     headers = {
         'Accept': 'application/json',
         'X-Requested-With': 'XMLHttpRequest',
+        'Authorization': f'Bearer {bearer_token}',
         'Referer': 'https://app.linklei.com.br/tarefas',
         'Origin': 'https://app.linklei.com.br',
     }
-    if api_token and api_token != 'SESSION':
-        headers['Authorization'] = f'Bearer {api_token}'
-    csrf_raw = sess.cookies.get('csrf_cookie_name', '')
-    if csrf_raw:
-        headers['X-CSRF-TOKEN'] = csrf_raw
-    xsrf = sess.cookies.get('XSRF-TOKEN', '')
-    if xsrf:
-        headers['X-XSRF-TOKEN'] = xsrf
 
     for url in [
         'https://app.linklei.com.br/api/v1/workspace/user-task/new',
-        *([ f'https://app.linklei.com.br/api/v1/{slug}/user-task/new' ] if slug else []),
         'https://app.linklei.com.br/api/v1/user-task/new',
     ]:
-        resp = sess.post(url, json={'title': title, 'deadline': deadline},
-                         headers=headers, timeout=20)
+        resp = requests.post(url, json={'title': title, 'deadline': deadline},
+                             headers=headers, timeout=20)
         if resp.status_code in (200, 201):
             return resp.status_code
         ct = resp.headers.get('content-type', '')
@@ -306,17 +256,17 @@ def main():
     created_tasks = []
     if movements:
         try:
-            sess, api_token, ud = linklei_login()
-            if api_token:
+            bearer_token = get_linklei_token()
+            if bearer_token:
                 deadline = (datetime.utcnow() + timedelta(days=4)).strftime('%Y-%m-%d')
                 for mov in movements:
-                    status = create_task(sess, api_token, mov['subject'], deadline, ud)
+                    status = create_task(bearer_token, mov['subject'], deadline)
                     print(f'  HTTP {status}: {mov["subject"][:70]}')
                     if status in (200, 201):
                         created_tasks.append(mov)
                 print(f'  {len(created_tasks)}/{len(movements)} tarefas criadas ✓')
             else:
-                print('  Sem api-token — tarefas não criadas')
+                print('  Sem token — tarefas não criadas')
         except Exception as e:
             print(f'  Erro: {e}')
     else:
