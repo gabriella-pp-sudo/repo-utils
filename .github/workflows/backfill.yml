@@ -27,6 +27,9 @@ jobs:
       - name: Instalar dependências
         run: pip install -r scripts/requirements.txt
 
+      - name: Instalar Playwright + Chromium
+        run: python -m playwright install --with-deps chromium
+
       - name: Executar backfill
         env:
           ASAAS_API_KEY:                ${{ secrets.ASAAS_API_KEY }}
