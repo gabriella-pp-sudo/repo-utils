@@ -71,20 +71,32 @@ def get_linklei_emails():
         return []
 
 # ── LinkLei — Playwright para capturar Bearer token ───────────────────────────
-def _find_visible(page, selectors, timeout=5000):
-    """Retorna o primeiro seletor visível dentro do timeout."""
+def _find_selector(page, selectors, state='visible', timeout=5000):
+    """Retorna o primeiro seletor encontrado no estado especificado."""
     from playwright.sync_api import TimeoutError as PWTimeout
     for sel in selectors:
         try:
-            page.wait_for_selector(sel, state='visible', timeout=timeout)
+            page.wait_for_selector(sel, state=state, timeout=timeout)
             return sel
         except PWTimeout:
             continue
     return None
 
+def _type_and_trigger(page, selector, text):
+    """Clica, digita e dispara eventos React/Vue no campo."""
+    page.click(selector)
+    page.evaluate(f"document.querySelector('{selector}').value = ''")
+    page.type(selector, text, delay=60)
+    page.evaluate(
+        "sel => { const el = document.querySelector(sel);"
+        " el.dispatchEvent(new Event('input', {bubbles:true}));"
+        " el.dispatchEvent(new Event('change', {bubbles:true})); }",
+        selector
+    )
+
 def get_linklei_token():
     """Faz login real via browser headless e intercepta o Bearer token do SPA."""
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
     captured = {'token': None}
 
@@ -112,8 +124,12 @@ def get_linklei_token():
         page.wait_for_load_state('networkidle', timeout=15000)
         print(f'  [Playwright] título: {page.title()} | URL: {page.url}')
 
-        # ── Preencher email ──────────────────────────────────────────────────
-        email_sel = _find_visible(page, [
+        # Imprimir todos os inputs logo após carregar (diagnóstico)
+        all_inputs = page.eval_on_selector_all('input', 'els => els.map(e => e.outerHTML)')
+        print(f'  [Playwright] inputs na página: {all_inputs}')
+
+        # ── Preencher email com type() para disparar eventos React ───────────
+        email_sel = _find_selector(page, [
             'input[type="email"]',
             'input[name="email"]',
             'input[placeholder*="email" i]',
@@ -121,15 +137,15 @@ def get_linklei_token():
         ], timeout=15000)
 
         if not email_sel:
-            inputs = page.eval_on_selector_all('input', 'els => els.map(e => e.outerHTML)')
-            print(f'  [Playwright] campos de input na página: {inputs}')
+            print('  [Playwright] campo email não encontrado')
             browser.close()
             return None
 
         print(f'  [Playwright] campo email: {email_sel}')
-        page.fill(email_sel, LINKLEI_EMAIL)
+        _type_and_trigger(page, email_sel, LINKLEI_EMAIL)
+        page.wait_for_timeout(1000)
 
-        # ── Campo de senha (pode não aparecer até o email ser submetido) ─────
+        # ── Campo de senha ───────────────────────────────────────────────────
         pwd_selectors = [
             'input[type="password"]',
             'input[name="password"]',
@@ -137,47 +153,46 @@ def get_linklei_token():
             'input[placeholder*="password" i]',
         ]
 
-        pwd_sel = _find_visible(page, pwd_selectors, timeout=3000)
+        # Verificar se a senha existe no DOM (mesmo que hidden)
+        pwd_in_dom = _find_selector(page, pwd_selectors, state='attached', timeout=2000)
+        pwd_sel = _find_selector(page, pwd_selectors, state='visible', timeout=2000)
 
-        if not pwd_sel:
-            # Formulário em duas etapas: submete o email primeiro
-            print('  [Playwright] senha não visível — submetendo email (Tab+Enter)...')
+        if pwd_in_dom and not pwd_sel:
+            print(f'  [Playwright] senha no DOM mas não visível ({pwd_in_dom}) — Tab para desfocar...')
             page.press(email_sel, 'Tab')
-            page.wait_for_timeout(500)
-            page.press(email_sel, 'Enter')
-            page.wait_for_timeout(2000)
-            next_btn = _find_visible(page, [
-                'button[type="submit"]',
-                'button:text("Próximo")',
-                'button:text("Continuar")',
-                'button:text("Next")',
-            ], timeout=3000)
-            if next_btn and not pwd_sel:
-                page.click(next_btn)
-                page.wait_for_timeout(2000)
-            pwd_sel = _find_visible(page, pwd_selectors, timeout=8000)
+            page.wait_for_timeout(800)
+            pwd_sel = _find_selector(page, pwd_selectors, state='visible', timeout=3000)
 
         if not pwd_sel:
-            inputs = page.eval_on_selector_all('input', 'els => els.map(e => e.outerHTML)')
-            print(f'  [Playwright] inputs após email: {inputs}')
+            # Aguardar o botão habilitar (React validou o email) e clicar
+            print('  [Playwright] aguardando botão submit habilitar...')
+            try:
+                page.wait_for_selector('button[type="submit"]:not([disabled])', timeout=6000)
+                page.click('button[type="submit"]')
+                page.wait_for_timeout(2000)
+            except PWTimeout:
+                print('  [Playwright] Enter no campo email...')
+                page.press(email_sel, 'Enter')
+                page.wait_for_timeout(2000)
+            pwd_sel = _find_selector(page, pwd_selectors, state='visible', timeout=6000)
+
+        if not pwd_sel:
+            after_inputs = page.eval_on_selector_all('input', 'els => els.map(e => e.outerHTML)')
+            print(f'  [Playwright] inputs após tentativas: {after_inputs}')
             browser.close()
             return None
 
         print(f'  [Playwright] campo senha: {pwd_sel}')
-        page.fill(pwd_sel, LINKLEI_PASSWORD)
+        _type_and_trigger(page, pwd_sel, LINKLEI_PASSWORD)
+        page.wait_for_timeout(500)
 
-        # ── Submeter formulário ──────────────────────────────────────────────
-        submit_sel = _find_visible(page, [
-            'button[type="submit"]',
-            'button:text("Entrar")',
-            'button:text("Login")',
-            'button:text("Acessar")',
-            'input[type="submit"]',
-        ], timeout=5000)
-
-        if submit_sel:
-            page.click(submit_sel)
-        else:
+        # ── Aguardar submit habilitar e enviar formulário ────────────────────
+        print('  [Playwright] aguardando submit...')
+        try:
+            page.wait_for_selector('button[type="submit"]:not([disabled])', timeout=8000)
+            page.click('button[type="submit"]')
+        except PWTimeout:
+            print('  [Playwright] Enter no campo senha')
             page.press(pwd_sel, 'Enter')
 
         page.wait_for_load_state('networkidle', timeout=20000)
