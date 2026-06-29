@@ -194,8 +194,59 @@ def get_linklei_token():
 
     return captured['token']
 
+# ── LinkLei — buscar team_member_id do usuário logado ─────────────────────────
+def get_team_member_id(token):
+    """Busca o ID de membro da equipe do usuário logado via API."""
+    headers = {
+        'Accept': 'application/json',
+        'Authorization': f'Bearer {token}',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Referer': 'https://app.linklei.com.br/tarefas',
+    }
+
+    def _search(obj, keys=('team_member_id', 'id_team_member', 'member_id'), depth=0):
+        if depth > 5 or not isinstance(obj, (dict, list)):
+            return None
+        if isinstance(obj, dict):
+            for k in keys:
+                if k in obj and obj[k]:
+                    return obj[k]
+            for v in obj.values():
+                r = _search(v, keys, depth + 1)
+                if r:
+                    return r
+        elif isinstance(obj, list):
+            for item in obj[:10]:
+                r = _search(item, keys, depth + 1)
+                if r:
+                    return r
+        return None
+
+    for url in [
+        'https://app.linklei.com.br/api/v1/workspace/user',
+        'https://app.linklei.com.br/api/v1/workspace/user/me',
+        'https://app.linklei.com.br/api/v1/workspace/team-member',
+        'https://app.linklei.com.br/api/v1/me',
+    ]:
+        try:
+            r = requests.get(url, headers=headers, timeout=15)
+            path = url.split('/api/v1/')[-1]
+            print(f'  [API] {path}: HTTP {r.status_code}')
+            if r.status_code == 200:
+                data = r.json()
+                tid = _search(data)
+                if tid:
+                    print(f'  [API] team_member_id: {tid}')
+                    return tid
+                top = list(data.keys())[:8] if isinstance(data, dict) else str(data)[:80]
+                print(f'  [API] keys: {top}')
+        except Exception as ex:
+            print(f'  [API] erro: {ex}')
+
+    return None
+
 # ── LinkLei — criar tarefa via API ────────────────────────────────────────────
-def create_task(bearer_token, title, deadline):
+def create_task(bearer_token, title, start_date, end_date, team_member_ids=None):
     if not bearer_token:
         return 0
 
@@ -206,13 +257,17 @@ def create_task(bearer_token, title, deadline):
         'Referer': 'https://app.linklei.com.br/tarefas',
         'Origin': 'https://app.linklei.com.br',
     }
+    payload = {'title': title, 'date': start_date, 'end_date': end_date}
+    if team_member_ids:
+        payload['team_member_id_list'] = (
+            team_member_ids if isinstance(team_member_ids, list) else [team_member_ids]
+        )
 
     for url in [
         'https://app.linklei.com.br/api/v1/workspace/user-task/new',
         'https://app.linklei.com.br/api/v1/user-task/new',
     ]:
-        resp = requests.post(url, json={'title': title, 'deadline': deadline},
-                             headers=headers, timeout=20)
+        resp = requests.post(url, json=payload, headers=headers, timeout=20)
         if resp.status_code in (200, 201):
             return resp.status_code
         ct = resp.headers.get('content-type', '')
@@ -278,17 +333,20 @@ def main():
     datas = sorted(by_date.keys())
     print(f'  Datas com emails: {[str(d) for d in datas]}')
 
-    # 2. Tarefas LinkLei — prazo = data do email + 4 dias
+    # 2. Tarefas LinkLei — início = data do email, prazo = data + 4 dias
     print('\n[2/3] Criando tarefas no LinkLei...')
     criadas = 0
     if emails:
         try:
             bearer_token = get_linklei_token()
             if bearer_token:
+                team_member_id = get_team_member_id(bearer_token)
+                team_ids = [team_member_id] if team_member_id else None
                 for e in emails:
-                    deadline = (datetime.combine(e['date'], datetime.min.time()) + timedelta(days=4)).strftime('%Y-%m-%d')
-                    status = create_task(bearer_token, e['subject'], deadline)
-                    print(f'  HTTP {status} [{e["date"]}] prazo {deadline}: {e["subject"][:60]}')
+                    start_date = e['date'].strftime('%Y-%m-%d')
+                    end_date = (datetime.combine(e['date'], datetime.min.time()) + timedelta(days=4)).strftime('%Y-%m-%d')
+                    status = create_task(bearer_token, e['subject'], start_date, end_date, team_ids)
+                    print(f'  HTTP {status} [{e["date"]}] prazo {end_date}: {e["subject"][:60]}')
                     if status in (200, 201):
                         criadas += 1
                 print(f'  {criadas}/{len(emails)} tarefas criadas ✓')
